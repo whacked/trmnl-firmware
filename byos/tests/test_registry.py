@@ -1,5 +1,3 @@
-import types
-
 import registry
 from registry import (renderer, mac, tag, model, glob, predicate,
                       resolve, resolve_config, set_default, RenderConfig)

@@ -55,16 +55,16 @@ class RegisteredRenderer:
     config: RenderConfig
 
 
+# Registration order is preserved by this list; resolve() relies on max() returning
+# the first maximal element, so equal-priority ties go to the earliest-registered.
 _renderers: list[RegisteredRenderer] = []
-_seq = 0  # registration order for stable tie-breaking
 _default: Optional[Callable] = None
 
 
 def reset() -> None:
     """Test helper: clear all registrations and the default."""
-    global _renderers, _seq, _default
+    global _renderers, _default
     _renderers = []
-    _seq = 0
     _default = None
 
 
@@ -78,12 +78,10 @@ def renderer(*, match: Matcher, priority: int = 0,
              full_refresh_every: Optional[int] = None,
              special_function: Optional[str] = None):
     def deco(fn):
-        global _seq
         _renderers.append(RegisteredRenderer(
             fn=fn, matcher=match, priority=priority,
             config=RenderConfig(refresh_rate, full_refresh_every, special_function),
         ))
-        _seq += 1
         return fn
     return deco
 
