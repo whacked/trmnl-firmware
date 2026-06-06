@@ -9,7 +9,8 @@ content WE control — no account, no MAC registration, no "email support@" step
 
 The Pydantic response models below ARE the spec for what the firmware consumes;
 each field is annotated with its firmware consumer. The device renders BITMAPS
-only (no HTML) — to change what shows, edit render_frame().
+only (no HTML) — to change what shows, add a renderer in byos/clients/ (matched
+via the registry) or edit render.default_render().
 
 Endpoints (firmware code that calls each):
   GET  /api/setup    setup.cpp        -> SetupResponse   (status MUST be 200)

@@ -42,9 +42,12 @@ def test_current_bmp_size(tmp_path, monkeypatch):
 
 def test_log_204_and_recorded(tmp_path, monkeypatch):
     c = _client(tmp_path, monkeypatch)
+    import server as server_mod
     r = c.post("/api/log", headers={"ID": "44:1B:F6:81:A2:80"},
                json={"log_array": [{"msg": "hello world"}]})
     assert r.status_code == 204
+    dev = server_mod.STATE.get("44:1B:F6:81:A2:80")
+    assert dev is not None and dev.last_log  # the line was recorded
 
 
 def test_pending_full_refresh_applies_once(tmp_path, monkeypatch):
