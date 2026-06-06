@@ -1,0 +1,12 @@
+# Ansible-style device inventory for the BYOS server.
+#   <group-name>:
+#     members: list of MACs (exact) or globs (fnmatch, e.g. "DC:44:*"), case-insensitive
+#     priority: higher wins when a device is in several groups (default 0)
+#     refresh_rate / full_refresh_every / special_function: optional per-group display config
+#
+# A device's tags = every group it matches. A plugin renderer in byos/clients/
+# can target a group via match=tag("garden").
+groups:
+  example_desk:
+    members: []          # e.g. ["44:1B:F6:81:A2:80"]
+    refresh_rate: 900

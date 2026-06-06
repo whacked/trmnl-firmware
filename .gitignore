@@ -18,3 +18,6 @@ byos/state.json
 byos/state.json.tmp
 byos/__pycache__/
 *.pyc
+
+# BYOS local device inventory (copy from inventory.example.yaml; never commit real MACs)
+byos/inventory.yaml
