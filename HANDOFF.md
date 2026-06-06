@@ -83,20 +83,33 @@ PLATFORMIO_BUILD_FLAGS="-D DEV_FIRMWARE -D ARDUINO_USB_MODE=1 -D ARDUINO_USB_CDC
 ## 3. The BYOS server (this repo: `byos/`)
 
 `byos/server.py` — **FastAPI** TRMNL-protocol server (`/api/setup`, `/api/display`,
-`POST /api/log`, `/current.bmp`). `byos/state.py` — Pydantic device state persisted
-atomically to `byos/state.json` (gitignored): every device tracked by MAC with the
-headers it reports (battery, RSSI, WiFi, fw, last-seen) and an issued
-`friendly_id`/`api_key`. Deps are fully nix-specified (`pillow fastapi uvicorn
-pydantic`). Run: `./byos/server.py` or `nix-shell byos/shell.nix --run 'python
-byos/server.py'`.
+`POST /api/log`, `/current.bmp`). Deps are fully nix-specified (`pillow fastapi
+uvicorn pydantic pyyaml`). Run: `./byos/server.py` or
+`nix-shell byos/shell.nix --run 'python byos/server.py'`.
+
+**The server is now a pluggable core:** `protocol.py` parses firmware headers →
+`DeviceReport`; `state.py` keeps a thread-safe Pydantic snapshot per device
+(battery, RSSI, WiFi, fw, last-seen, `friendly_id`, `api_key`) persisted atomically
+to `byos/state.json` (gitignored); `inventory.py` maps MACs/globs to named groups
+with per-group display config (refresh rate, full-refresh cadence, special function)
+loaded from `byos/inventory.yaml`; `registry.py` matches a device to the
+highest-priority registered renderer and resolves final display config (precedence:
+pending admin command > group > renderer default > global); `render.py` provides the
+default clock/stats renderer plus `to_bmp`/`to_png` encoders; `byos/clients/*.py`
+are auto-loaded plugins — drop a `.py`, register with `@renderer(match=…)`.
+`admin.py` serves an interactive `/admin` page (device table, PNG thumbnails,
+per-device action form); queued actions (force full refresh, special function, group
+override) apply on the device's next `/api/display` poll.
+
+For the full design rationale see
+`docs/superpowers/specs/2026-06-06-byos-pluggable-renderers-and-admin-design.md`;
+for the step-by-step implementation plan see
+`docs/superpowers/plans/2026-06-06-byos-pluggable-renderers-and-admin.md`.
 
 **Pointing the device here** (no hardcoded IP): enter the URL in the WiFi portal's
 server field (runtime, saved to NVS `api_url`), or build with
 `-D BYOS_SERVER_URL=\"http://host:8080\"`. The compile default is stock
 `https://trmnl.app` (`include/byos_config.h`).
-
-Customization hook: `render_frame(draw, img, dev)` in `server.py` draws the 800×480
-1-bit frame — v1 shows a clock/date + the requesting device's stats.
 
 ---
 
@@ -286,7 +299,7 @@ if (refresh_seconds >= 30*60 && iRefreshMode == REFRESH_PARTIAL)
 Done in the FastAPI phase (`byos/server.py` rewrite + `byos/state.py`):
 - [x] Final clean reflash of the XIAO (test pattern removed). Verified via server log.
 - [x] Server host decided: **Python/FastAPI**, deps fully nix-specified
-      (`pillow fastapi uvicorn pydantic`) → runs unchanged on this Mac and the NixOS box.
+      (`pillow fastapi uvicorn pydantic pyyaml`) → runs unchanged on this Mac and the NixOS box.
 - [x] Server reads `ID` + `Battery-Voltage` (+ RSSI/WiFi/FW/Model/Update-Source) into a
       Pydantic `state.json`; **v1 dashboard** renders that device's stats (clock, date,
       friendly_id, battery V + rough %, RSSI, WiFi, last-seen), per-device via `?mac=`.
@@ -299,10 +312,13 @@ Done in the FastAPI phase (`byos/server.py` rewrite + `byos/state.py`):
       `docs/.../2026-06-06-byos-server-and-refresh-cadence-design.md §Part 3`, ready to
       apply on a future reflash; until then the device uses its built-in default (8) and
       ignores the field — harmless.
+- [x] Server refactored to pluggable core: `protocol`→`state`→`inventory`→`registry`→
+      `render` pipeline; auto-loaded `byos/clients/` plugins; interactive `/admin` page.
+      29 tests. See `docs/superpowers/plans/2026-06-06-byos-pluggable-renderers-and-admin.md`.
 
 Still open:
 - [ ] Migrate the server to the NixOS host (currently run on the Mac). Same code/deps.
-- [ ] Build out the real dashboard beyond v1 (more widgets/layout) in `render_frame`.
+- [ ] Build out the real dashboard (more widgets/layout): add a renderer in `byos/clients/`.
 - [ ] Optional firmware PRs: skip boot logo for BYOS; apply the `full_refresh_every`
       firmware edit (only if you decide you want server-tunable flash cadence).
 - [ ] Power off the stray classic ESP32 (it also polls the server; only the XIAO
