@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -i python3 -p "python3.withPackages(ps: with ps; [ pillow fastapi uvicorn pydantic pyyaml ])"
+#!nix-shell -i python3 -p "python3.withPackages(ps: with ps; [ pillow fastapi uvicorn pydantic pyyaml python-multipart ])"
 """
 TRMNL BYOS (Bring Your Own Server) — FastAPI reference server.
 
@@ -40,6 +40,7 @@ from inventory import Inventory
 from state import StateStore
 from registry import RenderConfig, resolve, resolve_config
 from render import RenderContext, default_render, to_bmp
+from admin import build_router
 
 # --- settings / globals -----------------------------------------------------
 HOST = "0.0.0.0"
@@ -81,6 +82,7 @@ class DisplayResponse(BaseModel):
 
 
 app = FastAPI(title="trmnl-byos", version="3.0")
+app.include_router(build_router(STATE, INVENTORY))
 
 
 def _base(request: Request) -> str:
