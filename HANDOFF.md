@@ -82,15 +82,21 @@ PLATFORMIO_BUILD_FLAGS="-D DEV_FIRMWARE -D ARDUINO_USB_MODE=1 -D ARDUINO_USB_CDC
 
 ## 3. The BYOS server (this repo: `byos/`)
 
-`byos/server.py` — minimal TRMNL-protocol server. Run via nix-shell shebang
-(`./byos/server.py`, Pillow provided by nix) or `nix-shell byos/shell.nix`.
-The single config knob is **`include/byos_config.h` → `BYOS_SERVER_URL`**
-(currently `http://192.168.1.107:8080`), which feeds `API_BASE_URL` in
-`include/config.h`. Change it and reflash to point elsewhere; set back to
-`https://trmnl.app` for stock cloud.
+`byos/server.py` — **FastAPI** TRMNL-protocol server (`/api/setup`, `/api/display`,
+`POST /api/log`, `/current.bmp`). `byos/state.py` — Pydantic device state persisted
+atomically to `byos/state.json` (gitignored): every device tracked by MAC with the
+headers it reports (battery, RSSI, WiFi, fw, last-seen) and an issued
+`friendly_id`/`api_key`. Deps are fully nix-specified (`pillow fastapi uvicorn
+pydantic`). Run: `./byos/server.py` or `nix-shell byos/shell.nix --run 'python
+byos/server.py'`.
 
-Customization hook: `render_frame(draw, img)` in `server.py` draws the 800×480
-1-bit frame (currently a title + live clock).
+**Pointing the device here** (no hardcoded IP): enter the URL in the WiFi portal's
+server field (runtime, saved to NVS `api_url`), or build with
+`-D BYOS_SERVER_URL=\"http://host:8080\"`. The compile default is stock
+`https://trmnl.app` (`include/byos_config.h`).
+
+Customization hook: `render_frame(draw, img, dev)` in `server.py` draws the 800×480
+1-bit frame — v1 shows a clock/date + the requesting device's stats.
 
 ---
 
@@ -118,6 +124,7 @@ Parsed in `lib/trmnl/src/parse_response_api_display.cpp` → `ApiDisplayResponse
 | `image_url` | Image to download/show (empty ⇒ keep cached). |
 | `filename` | ID/log only. |
 | `refresh_rate` (s) | Deep-sleep duration **and** a refresh-mode lever (≥1800 s ⇒ FAST, see §7). |
+| `full_refresh_every` (int) | FULL-refresh cadence (every Nth update). Server emits 16; **firmware honours it only after the deferred Part 3 edit ships** — until then firmware uses its built-in 8 and ignores this. |
 | `maximum_compatibility` (bool) | `true` ⇒ **force FULL refresh every update** (max flashing). Default false. |
 | `temperature_profile` (`"a"`/`"b"`/absent) | Picks LUT profile 1/2/0 → speed vs ghosting (see §7). Persisted in flash. |
 | `special_function` | `identify/sleep/add_wifi/restart_playlist/rewind/send_to_me/guest_mode`. |
@@ -276,10 +283,27 @@ if (refresh_seconds >= 30*60 && iRefreshMode == REFRESH_PARTIAL)
 ---
 
 ## 8. Open items / next steps
-- [ ] Final clean reflash of the XIAO (drop the dev test-pattern; already removed from
-      source). Needs BOOT+power-switch bootloader entry.
-- [ ] Decide server host (Synology+Docker vs Pi Zero) → pick Terminus / node_lite / Go.
-- [ ] Server: read `ID` + `Battery-Voltage` headers; build the dashboard/layout.
-- [ ] Optional firmware PRs: skip boot logo for BYOS; tune full-refresh cadence.
-- [ ] `byos/server.py` `BYOS_SERVER_URL` is a hardcoded LAN IP — revisit when the
-      server moves to its permanent host.
+Done in the FastAPI phase (`byos/server.py` rewrite + `byos/state.py`):
+- [x] Final clean reflash of the XIAO (test pattern removed). Verified via server log.
+- [x] Server host decided: **Python/FastAPI**, deps fully nix-specified
+      (`pillow fastapi uvicorn pydantic`) → runs unchanged on this Mac and the NixOS box.
+- [x] Server reads `ID` + `Battery-Voltage` (+ RSSI/WiFi/FW/Model/Update-Source) into a
+      Pydantic `state.json`; **v1 dashboard** renders that device's stats (clock, date,
+      friendly_id, battery V + rough %, RSSI, WiFi, last-seen), per-device via `?mac=`.
+- [x] `POST /api/log` implemented (returns 204; records `last_seen`, prints body).
+- [x] Server URL de-hardcoded: compile default is stock `https://trmnl.app`, overridable
+      with `-D BYOS_SERVER_URL=\"http://host:8080\"`; **runtime portal field already
+      exists** (`api_server` → NVS `api_url`, used before the compile default).
+- [x] `full_refresh_every` emitted by the server (=16). **Firmware side deferred** (you
+      judged refresh already calm): the 3-line firmware edit is specced in
+      `docs/.../2026-06-06-byos-server-and-refresh-cadence-design.md §Part 3`, ready to
+      apply on a future reflash; until then the device uses its built-in default (8) and
+      ignores the field — harmless.
+
+Still open:
+- [ ] Migrate the server to the NixOS host (currently run on the Mac). Same code/deps.
+- [ ] Build out the real dashboard beyond v1 (more widgets/layout) in `render_frame`.
+- [ ] Optional firmware PRs: skip boot logo for BYOS; apply the `full_refresh_every`
+      firmware edit (only if you decide you want server-tunable flash cadence).
+- [ ] Power off the stray classic ESP32 (it also polls the server; only the XIAO
+      drives the panel).

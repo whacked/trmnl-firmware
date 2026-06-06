@@ -12,3 +12,9 @@ sdkconfig.*
 !sdkconfig.defaults
 managed_components/
 test/integration/test_config.h
+
+# BYOS runtime device state
+byos/state.json
+byos/state.json.tmp
+byos/__pycache__/
+*.pyc
