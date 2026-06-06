@@ -24,7 +24,6 @@ Run it:
 
 from __future__ import annotations
 
-import io
 import os
 import sys
 import datetime
@@ -32,193 +31,101 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
-from PIL import Image, ImageDraw, ImageFont
 
-from state import StateStore, DeviceState
+import registry
+import render
+from protocol import parse_report
+from inventory import Inventory
+from state import StateStore
+from registry import RenderConfig, resolve, resolve_config
+from render import RenderContext, default_render, to_bmp
 
-# ---------------------------------------------------------------------------
-# Settings (module-level constants; the only knobs)
-# ---------------------------------------------------------------------------
+# --- settings / globals -----------------------------------------------------
 HOST = "0.0.0.0"
 PORT = 8080
-
-# E-ink panel is exactly 800x480, 1 bit-per-pixel. Don't change unless the
-# firmware's bmp.cpp validator changes too.
-WIDTH, HEIGHT = 800, 480
-
-# Seconds the device deep-sleeps between /api/display polls (server-controlled).
 REFRESH_RATE = 900
-
-# Do a FULL (flashing) e-ink refresh every Nth update; PARTIAL (silent) between.
-# Emitted as `full_refresh_every`. The firmware honours it only once the (specced,
-# currently-deferred) 3-line firmware edit ships; until then the device uses its
-# built-in default (8) and ignores this field — harmless.
 FULL_REFRESH_EVERY = 16
+DEFAULTS = RenderConfig(refresh_rate=REFRESH_RATE, full_refresh_every=FULL_REFRESH_EVERY,
+                        special_function="none")
 
-# Flip if the panel renders inverted.
-INVERT = False
+_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE = StateStore(os.environ.get("BYOS_STATE", os.path.join(_DIR, "state.json")))
+INVENTORY = Inventory.load(os.environ.get("BYOS_INVENTORY", os.path.join(_DIR, "inventory.yaml")))
 
-WHITE, BLACK = 255, 0
+# Register the default + load client plugins at import time.
+registry.set_default(default_render)
+registry.load_clients(os.path.join(_DIR, "clients"))
 
-STATE = StateStore(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"))
 
-
-# ---------------------------------------------------------------------------
-# Response models = the server-side spec (field -> firmware consumer)
-# ---------------------------------------------------------------------------
+# --- response models --------------------------------------------------------
 class SetupResponse(BaseModel):
-    status: int = 200            # parse_response_api_setup.cpp REQUIRES 200
-    api_key: str                 # saved to NVS; sent back as Access-Token
-    friendly_id: str             # saved to NVS; shown on device
-    image_url: str               # first image to show
+    status: int = 200
+    api_key: str
+    friendly_id: str
+    image_url: str
     filename: str = "setup"
     message: str = "BYOS setup ok"
 
 
 class DisplayResponse(BaseModel):
-    status: int = 0                      # 0 = normal content
-    image_url: str                       # image to download + show
-    filename: str                        # cache id / log label
-    refresh_rate: int = REFRESH_RATE     # deep-sleep seconds + refresh-mode lever
-    full_refresh_every: int = FULL_REFRESH_EVERY  # FULL-refresh cadence (see above)
+    status: int = 0
+    image_url: str
+    filename: str
+    refresh_rate: int
+    full_refresh_every: int
+    special_function: str = "none"
     update_firmware: bool = False
     firmware_url: Optional[str] = None
     reset_firmware: bool = False
-    special_function: str = "none"
 
 
-# ---------------------------------------------------------------------------
-# Dashboard — the customization hook. `dev` is the requesting device (or None).
-# `draw` is a PIL.ImageDraw on an 800x480 1-bit canvas; use BLACK / WHITE.
-# ---------------------------------------------------------------------------
-def _font(size: int):
-    for path in (
-        "/run/current-system/sw/share/X11/fonts/DejaVuSans-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/SFNS.ttf",
-    ):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def render_frame(draw: "ImageDraw.ImageDraw", img: "Image.Image", dev: Optional[DeviceState]) -> None:
-    now = datetime.datetime.now()
-
-    # Frame border
-    draw.rectangle([4, 4, WIDTH - 5, HEIGHT - 5], outline=BLACK, width=3)
-
-    # Header
-    draw.text((40, 34), "TRMNL BYOS", font=_font(64), fill=BLACK)
-    draw.text((42, 110), "your own server", font=_font(30), fill=BLACK)
-    draw.line([40, 156, WIDTH - 40, 156], fill=BLACK, width=2)
-
-    # Big live clock — proves the frame is freshly rendered each poll.
-    draw.text((40, 180), now.strftime("%H:%M"), font=_font(150), fill=BLACK)
-    draw.text((44, 350), now.strftime("%A, %d %B %Y"), font=_font(34), fill=BLACK)
-
-    # Device status panel (right side) — from the headers the device reports.
-    x = 448
-    if dev is not None:
-        pct = dev.battery_percent()
-        batt = "—"
-        if dev.battery_voltage is not None:
-            batt = f"{dev.battery_voltage:.2f} V"
-            if pct is not None:
-                batt += f"  ({pct}%)"
-        rows = [
-            ("Device", dev.friendly_id),
-            ("MAC", dev.mac),
-            ("Battery", batt),
-            ("WiFi", (dev.wifi_ssid or "—")),
-            ("RSSI", (f"{dev.rssi} dBm" if dev.rssi is not None else "—")),
-            ("FW", (dev.fw_version or "—")),
-            ("Seen", dev.last_seen.astimezone().strftime("%H:%M:%S")),
-        ]
-    else:
-        rows = [("Device", "waiting for first poll…")]
-
-    y = 184
-    for label, value in rows:
-        draw.text((x, y), f"{label}:", font=_font(20), fill=BLACK)
-        draw.text((x + 100, y), str(value), font=_font(20), fill=BLACK)
-        y += 38
-
-
-def render_bmp(dev: Optional[DeviceState]) -> bytes:
-    img = Image.new("1", (WIDTH, HEIGHT), WHITE)
-    draw = ImageDraw.Draw(img)
-    render_frame(draw, img, dev)
-    if INVERT:
-        img = img.point(lambda p: WHITE if p == BLACK else BLACK)
-    buf = io.BytesIO()
-    img.save(buf, format="BMP")
-    return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# HTTP layer
-# ---------------------------------------------------------------------------
-app = FastAPI(title="trmnl-byos", version="2.0")
+app = FastAPI(title="trmnl-byos", version="3.0")
 
 
 def _base(request: Request) -> str:
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    return f"http://{host}"
+    return f"http://{request.headers.get('host') or f'127.0.0.1:{PORT}'}"
 
 
-def _int(request: Request, name: str) -> Optional[int]:
-    v = request.headers.get(name)
-    try:
-        return int(v) if v is not None else None
-    except ValueError:
-        return None
-
-
-def _float(request: Request, name: str) -> Optional[float]:
-    v = request.headers.get(name)
-    try:
-        return float(v) if v is not None else None
-    except ValueError:
-        return None
+def _resolve_tags(mac: str) -> list[str]:
+    dev = STATE.get(mac)
+    if dev and dev.group_override:
+        return [dev.group_override]
+    return INVENTORY.resolve_tags(mac)
 
 
 @app.get("/api/setup")
 def api_setup(request: Request):
-    mac = request.headers.get("ID", "00:00:00:00:00:00")
-    dev = STATE.upsert(
-        mac,
-        fw_version=request.headers.get("FW-Version"),
-        model=request.headers.get("Model"),
-    )
-    print(f"  setup   {mac} -> {dev.friendly_id}")
-    return SetupResponse(
-        api_key=dev.api_key,
-        friendly_id=dev.friendly_id,
-        image_url=f"{_base(request)}/current.bmp?mac={mac}",
-    )
+    report = parse_report(request.headers)
+    dev = STATE.upsert_report(report, _resolve_tags(report.mac))
+    print(f"  setup   {dev.mac} -> {dev.friendly_id}")
+    return SetupResponse(api_key=dev.api_key, friendly_id=dev.friendly_id,
+                         image_url=f"{_base(request)}/current.bmp?mac={dev.mac}")
 
 
 @app.get("/api/display")
 def api_display(request: Request):
-    mac = request.headers.get("ID", "00:00:00:00:00:00")
-    dev = STATE.upsert(
-        mac,
-        fw_version=request.headers.get("FW-Version"),
-        model=request.headers.get("Model"),
-        battery_voltage=_float(request, "Battery-Voltage"),
-        rssi=_int(request, "RSSI"),
-        wifi_ssid=request.headers.get("WiFi-SSID"),
-        refresh_rate=_int(request, "Refresh-Rate"),
-        update_source=request.headers.get("Update-Source"),
-    )
+    report = parse_report(request.headers)
+    dev = STATE.upsert_report(report, _resolve_tags(report.mac))
+    reg = resolve(dev)
+    pending = STATE.take_pending(dev.mac)
+    pending_cfg = {}
+    if pending.force_full_refresh:
+        pending_cfg["full_refresh_every"] = 1
+    if pending.special_function:
+        pending_cfg["special_function"] = pending.special_function
+    group_cfgs = [RenderConfig(refresh_rate=g.refresh_rate,
+                               full_refresh_every=g.full_refresh_every,
+                               special_function=g.special_function)
+                  for _, g in INVENTORY.settings_for(dev.tags)]
+    cfg = resolve_config(pending_cfg, group_cfgs, reg.config, DEFAULTS)
     now = datetime.datetime.now()
-    print(f"  display {mac} batt={dev.battery_voltage} rssi={dev.rssi} src={dev.update_source}")
+    print(f"  display {dev.mac} batt={dev.battery_voltage} rssi={dev.rssi} "
+          f"rate={cfg.refresh_rate} fre={cfg.full_refresh_every} sf={cfg.special_function}")
     return DisplayResponse(
-        image_url=f"{_base(request)}/current.bmp?mac={mac}",
+        image_url=f"{_base(request)}/current.bmp?mac={dev.mac}",
         filename=f"frame-{now:%Y%m%d%H%M%S}",
+        refresh_rate=cfg.refresh_rate, full_refresh_every=cfg.full_refresh_every,
+        special_function=cfg.special_function or "none",
     )
 
 
@@ -228,39 +135,37 @@ async def api_log(request: Request):
     try:
         body = (await request.body()).decode("utf-8", "replace")
     except Exception:
-        body = "<unreadable>"
-    STATE.upsert(mac)  # just touch last_seen
-    print(f"  log     {mac}: {body[:300]}")
-    return Response(status_code=204)  # accept anything; never 4xx/5xx on a log
+        body = ""
+    STATE.set_last_log(mac, body.strip().splitlines()[0][:300] if body.strip() else "")
+    print(f"  log     {mac}: {body[:200]}")
+    return Response(status_code=204)
 
 
-def _bmp_response(request: Request, head: bool) -> Response:
-    mac = request.query_params.get("mac")
+def _render_for(mac: Optional[str]):
     dev = STATE.get(mac) if mac else STATE.latest()
-    data = render_bmp(dev)
-    headers = {"Content-Length": str(len(data))}
-    if head:
-        return Response(status_code=200, media_type="image/bmp", headers=headers)
-    return Response(content=data, media_type="image/bmp", headers=headers)
+    if dev is None:
+        return render.blank()
+    return resolve(dev).fn(RenderContext(device=dev))
 
 
 @app.get("/current.bmp")
 def current_bmp(request: Request):
-    return _bmp_response(request, head=False)
+    data = to_bmp(_render_for(request.query_params.get("mac")))
+    return Response(content=data, media_type="image/bmp",
+                    headers={"Content-Length": str(len(data))})
 
 
 @app.head("/current.bmp")
 def current_bmp_head(request: Request):
-    return _bmp_response(request, head=True)
+    data = to_bmp(_render_for(request.query_params.get("mac")))
+    return Response(status_code=200, media_type="image/bmp",
+                    headers={"Content-Length": str(len(data))})
 
 
 def main() -> None:
     import uvicorn
-
     sys.stdout.reconfigure(line_buffering=True)
-    print(f"TRMNL BYOS (FastAPI) on http://{HOST}:{PORT}")
-    print("  GET /api/setup   GET /api/display   POST /api/log   GET /current.bmp")
-    print(f"  refresh_rate={REFRESH_RATE}s  full_refresh_every={FULL_REFRESH_EVERY}  state={STATE._path}")
+    print(f"TRMNL BYOS (FastAPI) on http://{HOST}:{PORT}  state={STATE._path}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
