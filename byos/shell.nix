@@ -4,5 +4,5 @@
 { pkgs ? import <nixpkgs> { } }:
 
 pkgs.mkShell {
-  packages = [ (pkgs.python3.withPackages (ps: with ps; [ pillow fastapi uvicorn pydantic ])) ];
+  packages = [ (pkgs.python3.withPackages (ps: with ps; [ pillow fastapi uvicorn pydantic pyyaml pytest httpx ])) ];
 }

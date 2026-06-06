@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -i python3 -p "python3.withPackages(ps: with ps; [ pillow fastapi uvicorn pydantic ])"
+#!nix-shell -i python3 -p "python3.withPackages(ps: with ps; [ pillow fastapi uvicorn pydantic pyyaml ])"
 """
 TRMNL BYOS (Bring Your Own Server) — FastAPI reference server.
 
