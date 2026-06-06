@@ -46,14 +46,14 @@ def build_router(state: StateStore, inventory: Inventory) -> APIRouter:
             if d.pending.force_full_refresh:
                 pend.append("full")
             if d.pending.special_function:
-                pend.append(d.pending.special_function)
+                pend.append(html.escape(d.pending.special_function))
             pend_badge = f" <b>⏳ {'/'.join(pend)}</b>" if pend else ""
             sf_opts = "".join(
                 f"<option {'selected' if s == (d.pending.special_function or 'none') else ''}>{s}</option>"
                 for s in SPECIAL_FUNCTIONS)
             grp_opts = "".join(
-                f"<option value='{g}' {'selected' if g == (d.group_override or '') else ''}>"
-                f"{g or '(auto)'}</option>" for g in groups)
+                f"<option value='{html.escape(g)}' {'selected' if g == (d.group_override or '') else ''}>"
+                f"{html.escape(g) or '(auto)'}</option>" for g in groups)
             rows.append(f"""
 <tr>
   <td>{html.escape(d.friendly_id)}</td>
