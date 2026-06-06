@@ -126,6 +126,9 @@ def api_display(request: Request):
           f"rate={cfg.refresh_rate} fre={cfg.full_refresh_every} sf={cfg.special_function}")
     return DisplayResponse(
         image_url=f"{_base(request)}/current.bmp?mac={dev.mac}",
+        # Deliberately unique per poll so the device always re-downloads the live
+        # frame (the firmware skips the fetch when filename is unchanged). For a
+        # STATIC renderer, switch this to a content hash to re-enable Image-Cached.
         filename=f"frame-{now:%Y%m%d%H%M%S}",
         refresh_rate=cfg.refresh_rate, full_refresh_every=cfg.full_refresh_every,
         special_function=cfg.special_function or "none",
