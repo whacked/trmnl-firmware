@@ -179,6 +179,10 @@ enum WIFI_CONNECT_RETRY_TIME // Time to sleep before trying to connect to the Wi
 #define BUTTON_DOUBLE_CLICK_WINDOW 800
 
 #define SERVER_MAX_RETRIES 3
-#define API_BASE_URL "https://trmnl.app"
+
+// Server base URL. Defined in byos_config.h so the one knob you change is easy
+// to find. To return to the stock cloud, set this back to "https://trmnl.app".
+#include "byos_config.h"
+#define API_BASE_URL BYOS_SERVER_URL
 
 #endif
