@@ -1,13 +1,8 @@
-"""
-Device state for the TRMNL BYOS server.
+"""Latest-snapshot device state for the BYOS server.
 
-Every device that talks to us is tracked in a JSON file (byos/state.json) that is
-*only* ever produced by Pydantic's model_dump_json() and consumed by
-model_validate_json() — no hand-rolled dict munging. The in-memory ServerState is
-authoritative; the file is a durable mirror written atomically.
-
-Fields come straight from the firmware's request headers
-(lib/trmnl/src/api-client/request_headers.cpp). See server.py for the mapping.
+The JSON file is only ever produced by model_dump_json() and consumed by
+model_validate_json(). In-memory ServerState is authoritative; the file is an
+atomically-written mirror. Thread-safe (uvicorn serves concurrently).
 """
 
 from __future__ import annotations
@@ -15,38 +10,50 @@ from __future__ import annotations
 import os
 import threading
 from datetime import datetime, timezone
+from typing import Optional
 
 from pydantic import BaseModel, Field
+
+from protocol import DeviceReport
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class DeviceState(BaseModel):
-    """One device, keyed by its MAC (the `ID` header)."""
+class PendingCommands(BaseModel):
+    force_full_refresh: bool = False
+    special_function: Optional[str] = None
 
+
+class DeviceState(BaseModel):
     mac: str
     friendly_id: str
     api_key: str
-    model: str | None = None
-    fw_version: str | None = None
+    model: Optional[str] = None
+    fw_version: Optional[str] = None
     first_seen: datetime = Field(default_factory=_now)
     last_seen: datetime = Field(default_factory=_now)
 
-    # Reported each /api/display poll (all optional → a sparse /api/setup validates).
-    battery_voltage: float | None = None
-    rssi: int | None = None
-    wifi_ssid: str | None = None
-    refresh_rate: int | None = None
-    update_source: str | None = None
-    last_image_filename: str | None = None
+    # reported telemetry (latest)
+    battery_voltage: Optional[float] = None
+    rssi: Optional[int] = None
+    wifi_ssid: Optional[str] = None
+    wifi_band: Optional[str] = None
+    refresh_rate: Optional[int] = None
+    update_source: Optional[str] = None
+    wake_time: Optional[int] = None
+    image_cached: Optional[bool] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    last_log: Optional[str] = None
 
-    def battery_percent(self) -> int | None:
-        """Rough LiPo state-of-charge from voltage (no fuel gauge on the OG).
+    # resolution + admin
+    tags: list[str] = Field(default_factory=list)
+    group_override: Optional[str] = None
+    pending: PendingCommands = Field(default_factory=PendingCommands)
 
-        Linear 3.30 V (0%) … 4.20 V (100%); clamped. Coarse but useful.
-        """
+    def battery_percent(self) -> Optional[int]:
         if self.battery_voltage is None:
             return None
         pct = (self.battery_voltage - 3.30) / (4.20 - 3.30) * 100.0
@@ -55,12 +62,17 @@ class DeviceState(BaseModel):
 
 class ServerState(BaseModel):
     devices: dict[str, DeviceState] = Field(default_factory=dict)
-    next_seq: int = 1  # first device → DEV001
+    next_seq: int = 1
+
+
+# Fields copied from a DeviceReport into a DeviceState on each poll.
+_REPORT_FIELDS = (
+    "model", "fw_version", "battery_voltage", "rssi", "wifi_ssid", "wifi_band",
+    "refresh_rate", "update_source", "wake_time", "image_cached", "width", "height",
+)
 
 
 class StateStore:
-    """Thread-safe, atomically-persisted wrapper around a ServerState."""
-
     def __init__(self, path: str) -> None:
         self._path = path
         self._lock = threading.Lock()
@@ -72,7 +84,7 @@ class StateStore:
                 return ServerState.model_validate_json(f.read())
         except FileNotFoundError:
             return ServerState()
-        except Exception as e:  # corrupt/unreadable → start fresh, never brick
+        except Exception as e:
             print(f"  [state] WARNING: {self._path} unreadable ({e}); starting empty")
             return ServerState()
 
@@ -80,38 +92,79 @@ class StateStore:
         tmp = self._path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(self._state.model_dump_json(indent=2))
-        os.replace(tmp, self._path)  # atomic; a crash mid-write can't truncate
+        os.replace(tmp, self._path)
 
-    def upsert(self, mac: str, **fields) -> DeviceState:
-        """Create-or-update the device for `mac`, set provided fields, persist."""
+    def _get_or_create_locked(self, mac: str) -> DeviceState:
+        dev = self._state.devices.get(mac)
+        if dev is None:
+            seq = self._state.next_seq
+            self._state.next_seq += 1
+            dev = DeviceState(
+                mac=mac,
+                friendly_id=f"DEV{seq:03d}",
+                api_key="byos-" + mac.replace(":", "").lower(),
+            )
+            self._state.devices[mac] = dev
+        return dev
+
+    def upsert_report(self, report: DeviceReport, tags: list[str]) -> DeviceState:
+        with self._lock:
+            dev = self._get_or_create_locked(report.mac)
+            for f in _REPORT_FIELDS:
+                v = getattr(report, f)
+                if v is not None:
+                    setattr(dev, f, v)
+            if report.api_key:
+                dev.api_key = report.api_key
+            dev.tags = list(tags)
+            dev.last_seen = _now()
+            self._persist_locked()
+            return dev.model_copy(deep=True)
+
+    def queue_command(self, mac: str, *, force_full_refresh: bool = False,
+                      special_function: Optional[str] = None) -> None:
+        with self._lock:
+            dev = self._get_or_create_locked(mac)
+            if force_full_refresh:
+                dev.pending.force_full_refresh = True
+            if special_function is not None:
+                dev.pending.special_function = special_function or None
+            self._persist_locked()
+
+    def take_pending(self, mac: str) -> PendingCommands:
         with self._lock:
             dev = self._state.devices.get(mac)
             if dev is None:
-                seq = self._state.next_seq
-                self._state.next_seq += 1
-                dev = DeviceState(
-                    mac=mac,
-                    friendly_id=f"DEV{seq:03d}",
-                    api_key="byos-" + mac.replace(":", "").lower(),
-                )
-                self._state.devices[mac] = dev
-            for k, v in fields.items():
-                if v is not None and hasattr(dev, k):
-                    setattr(dev, k, v)
+                return PendingCommands()
+            p = dev.pending.model_copy(deep=True)
+            dev.pending = PendingCommands()
+            self._persist_locked()
+            return p
+
+    def set_group_override(self, mac: str, group: Optional[str]) -> None:
+        with self._lock:
+            dev = self._get_or_create_locked(mac)
+            dev.group_override = group or None
+            self._persist_locked()
+
+    def set_last_log(self, mac: str, line: str) -> None:
+        with self._lock:
+            dev = self._get_or_create_locked(mac)
+            dev.last_log = line
             dev.last_seen = _now()
             self._persist_locked()
-            # return a copy so callers can't mutate the stored model unlocked
-            return dev.model_copy(deep=True)
 
-    def get(self, mac: str) -> DeviceState | None:
+    def get(self, mac: str) -> Optional[DeviceState]:
         with self._lock:
             dev = self._state.devices.get(mac)
             return dev.model_copy(deep=True) if dev else None
 
-    def latest(self) -> DeviceState | None:
-        """Most-recently-seen device (used when no specific device is requested)."""
+    def all(self) -> list[DeviceState]:
+        with self._lock:
+            return [d.model_copy(deep=True) for d in self._state.devices.values()]
+
+    def latest(self) -> Optional[DeviceState]:
         with self._lock:
             if not self._state.devices:
                 return None
-            dev = max(self._state.devices.values(), key=lambda d: d.last_seen)
-            return dev.model_copy(deep=True)
+            return max(self._state.devices.values(), key=lambda d: d.last_seen).model_copy(deep=True)
