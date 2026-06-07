@@ -10,3 +10,6 @@ groups:
   example_desk:
     members: []          # e.g. ["44:1B:F6:81:A2:80"]
     refresh_rate: 900
+  upside-down:           # rendered by clients/upside_down.py (flips frame 180°)
+    members:
+      - "AA:BB:CC:DD:EE:FF"
