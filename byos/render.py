@@ -7,8 +7,13 @@ image. Plugins may import default_render and draw on top of it.
 from __future__ import annotations
 
 import io
+import os
+import sys
 import datetime
+import functools
+import subprocess
 from dataclasses import dataclass
+from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -30,16 +35,51 @@ class RenderContext:
         return datetime.datetime.now()
 
 
-def font(size: int):
+def _font_path() -> Optional[str]:
+    """Locate a bold sans TTF, resolved once and cached.
+
+    Static paths are fragile across machines (the original NixOS path is a
+    /run/current-system symlink that doesn't exist on every Linux box, and the
+    nix store hash changes per build). So ask fontconfig first via `fc-match`,
+    which works on Linux and macOS; fall back to known absolute paths only if
+    fontconfig isn't available.
+    """
+    for query in ("DejaVu Sans:bold", "sans:bold"):
+        try:
+            out = subprocess.run(["fc-match", "-f", "%{file}", query],
+                                 capture_output=True, text=True, timeout=5)
+            path = out.stdout.strip()
+            if path and os.path.exists(path):
+                return path
+        except (OSError, subprocess.SubprocessError):
+            break  # fc-match missing; skip remaining queries
     for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/run/current-system/sw/share/X11/fonts/DejaVuSans-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/SFNS.ttf",
     ):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _resolved_font_path() -> Optional[str]:
+    path = _font_path()
+    if path is None:
+        print("  WARN: no TTF font found (fc-match + static paths failed); "
+              "text will render with PIL's tiny default font", file=sys.stderr)
+    return path
+
+
+def font(size: int):
+    path = _resolved_font_path()
+    if path:
         try:
             return ImageFont.truetype(path, size)
         except OSError:
-            continue
+            pass
     return ImageFont.load_default()
 
 
